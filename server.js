@@ -1,6 +1,10 @@
 require('dotenv').config();
 const app = require('./app');
 const { sequelize } = require('./models');
+const qrRoutes = require('./routes/qrRoutes');
+
+// Register QR routes
+app.use('/api/qr', qrRoutes);
 
 const PORT = process.env.PORT || 5000;
 
@@ -21,6 +25,7 @@ sequelize.authenticate()
       console.log(`📍 Port: ${PORT}`);
       console.log(`🌍 Environment: ${process.env.NODE_ENV}`);
       console.log(`🔗 API: http://localhost:${PORT}/api`);
+      console.log(`🔗 QR API: http://localhost:${PORT}/api/qr`);
       console.log(`❤️  Health Check: http://localhost:${PORT}/api/health`);
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     });

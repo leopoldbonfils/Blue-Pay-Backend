@@ -1,5 +1,4 @@
 const { User, Transaction, Notification, sequelize } = require('../models');
-const { Op } = require('sequelize');
 
 exports.sendBluePay = async (req, res) => {
   const t = await sequelize.transaction();
@@ -8,6 +7,7 @@ exports.sendBluePay = async (req, res) => {
     const { phone, amount, message } = req.body;
 
     if (!phone || !amount || amount <= 0) {
+      await t.rollback();
       return res.status(400).json({
         status: 'error',
         message: 'Phone number and valid amount are required'
@@ -55,7 +55,11 @@ exports.sendBluePay = async (req, res) => {
       { transaction: t }
     );
 
+    // Generate transaction ID
+    const txnId = `TXN-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).substring(2, 9).toUpperCase()}`;
+
     const transaction = await Transaction.create({
+      transaction_id: txnId,
       type: 'out',
       category: 'Transfer',
       label: `Sent to ${receiver.name}`,
@@ -72,7 +76,7 @@ exports.sendBluePay = async (req, res) => {
     }, { transaction: t });
 
     await Transaction.create({
-      transaction_id: transaction.transaction_id + '-IN',
+      transaction_id: txnId + '-IN',
       type: 'in',
       category: 'Transfer',
       label: `Received from ${sender.name}`,

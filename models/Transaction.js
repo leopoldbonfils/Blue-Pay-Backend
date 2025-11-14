@@ -11,12 +11,12 @@ module.exports = (sequelize) => {
     },
     label: { type: DataTypes.STRING(255), allowNull: false },
     amount: { type: DataTypes.DECIMAL(15, 2), allowNull: false },
-    sender_id: { type: DataTypes.INTEGER, allowNull: true, references: { model: 'users', key: 'id' } },
-    receiver_id: { type: DataTypes.INTEGER, allowNull: true, references: { model: 'users', key: 'id' } },
+    sender_id: { type: DataTypes.INTEGER, allowNull: true },
+    receiver_id: { type: DataTypes.INTEGER, allowNull: true },
     sender_phone: { type: DataTypes.STRING(20), allowNull: true },
     receiver_phone: { type: DataTypes.STRING(20), allowNull: true },
     message: { type: DataTypes.TEXT, allowNull: true },
-    status: { type: DataTypes.ENUM('pending', 'completed', 'failed', 'cancelled'), defaultValue: 'pending' },
+    status: { type: DataTypes.ENUM('pending', 'completed', 'failed', 'cancelled'), defaultValue: 'completed' },
     payment_method: { type: DataTypes.ENUM('BluePay', 'MOMO', 'Bank', 'NFC'), allowNull: false },
     bank_name: { type: DataTypes.STRING(50), allowNull: true },
     account_number: { type: DataTypes.STRING(50), allowNull: true },
@@ -29,9 +29,11 @@ module.exports = (sequelize) => {
     underscored: true,
     hooks: {
       beforeCreate: (transaction) => {
-        const timestamp = Date.now().toString(36).toUpperCase();
-        const random = Math.random().toString(36).substring(2, 9).toUpperCase();
-        transaction.transaction_id = `TXN-${timestamp}-${random}`;
+        if (!transaction.transaction_id) {
+          const timestamp = Date.now().toString(36).toUpperCase();
+          const random = Math.random().toString(36).substring(2, 9).toUpperCase();
+          transaction.transaction_id = `TXN-${timestamp}-${random}`;
+        }
       }
     }
   });
