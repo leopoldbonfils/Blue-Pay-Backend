@@ -1,4 +1,6 @@
 const { User, Transaction, Notification, sequelize } = require('../models');
+const momoService = require('../services/momoService');
+const bankService = require('../services/bankService');
 
 exports.sendBluePay = async (req, res) => {
   const t = await sequelize.transaction();
@@ -30,7 +32,7 @@ exports.sendBluePay = async (req, res) => {
       await t.rollback();
       return res.status(404).json({
         status: 'error',
-        message: 'Receiver not found'
+        message: 'Receiver not found. Make sure they have a BluePay account.'
       });
     }
 
@@ -110,6 +112,180 @@ exports.sendBluePay = async (req, res) => {
   } catch (error) {
     await t.rollback();
     console.error('BluePay error:', error);
+    res.status(500).json({ status: 'error', message: error.message });
+  }
+};
+
+exports.sendMobileMoney = async (req, res) => {
+  const t = await sequelize.transaction();
+
+  try {
+    const { phone, amount, message } = req.body;
+
+    if (!phone || !amount || amount <= 0) {
+      await t.rollback();
+      return res.status(400).json({
+        status: 'error',
+        message: 'Phone number and valid amount are required'
+      });
+    }
+
+    const sender = await User.findByPk(req.user.id, { transaction: t });
+
+    if (parseFloat(sender.balance) < parseFloat(amount)) {
+      await t.rollback();
+      return res.status(400).json({
+        status: 'error',
+        message: 'Insufficient balance'
+      });
+    }
+
+    const senderBalanceBefore = parseFloat(sender.balance);
+    const txnId = `MOMO-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).substring(2, 9).toUpperCase()}`;
+
+    // Initiate MOMO transfer
+    const momoResult = await momoService.transfer(amount, phone, txnId, message || 'BluePay Transfer');
+
+    if (!momoResult.success) {
+      await t.rollback();
+      return res.status(400).json({
+        status: 'error',
+        message: momoResult.error || 'Mobile money transfer failed'
+      });
+    }
+
+    // Deduct from sender's balance
+    await sender.update(
+      { balance: senderBalanceBefore - parseFloat(amount) },
+      { transaction: t }
+    );
+
+    // Create transaction record
+    const transaction = await Transaction.create({
+      transaction_id: txnId,
+      type: 'out',
+      category: 'Mobile Money',
+      label: `Sent to ${phone}`,
+      amount,
+      sender_id: sender.id,
+      sender_phone: sender.phone,
+      receiver_phone: phone,
+      message,
+      status: 'completed',
+      payment_method: 'Mobile Money',
+      balance_before: senderBalanceBefore,
+      balance_after: senderBalanceBefore - parseFloat(amount),
+      external_reference: momoResult.referenceId
+    }, { transaction: t });
+
+    await t.commit();
+
+    res.json({
+      status: 'success',
+      message: 'Mobile money transfer initiated successfully',
+      data: { 
+        transaction,
+        referenceId: momoResult.referenceId
+      }
+    });
+  } catch (error) {
+    await t.rollback();
+    console.error('Mobile money error:', error);
+    res.status(500).json({ status: 'error', message: error.message });
+  }
+};
+
+exports.sendBankTransfer = async (req, res) => {
+  const t = await sequelize.transaction();
+
+  try {
+    const { bank_name, account_number, amount, message } = req.body;
+
+    if (!bank_name || !account_number || !amount || amount <= 0) {
+      await t.rollback();
+      return res.status(400).json({
+        status: 'error',
+        message: 'Bank name, account number, and valid amount are required'
+      });
+    }
+
+    const sender = await User.findByPk(req.user.id, { transaction: t });
+
+    if (parseFloat(sender.balance) < parseFloat(amount)) {
+      await t.rollback();
+      return res.status(400).json({
+        status: 'error',
+        message: 'Insufficient balance'
+      });
+    }
+
+    const senderBalanceBefore = parseFloat(sender.balance);
+    const txnId = `BANK-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).substring(2, 9).toUpperCase()}`;
+
+    // Verify bank account
+    const verifyResult = await bankService.verifyAccount(bank_name, account_number);
+    
+    if (!verifyResult.success || !verifyResult.verified) {
+      await t.rollback();
+      return res.status(400).json({
+        status: 'error',
+        message: verifyResult.error || 'Bank account verification failed'
+      });
+    }
+
+    // Initiate bank transfer
+    const bankResult = await bankService.initiateTransfer(bank_name, account_number, amount, txnId);
+
+    if (!bankResult.success) {
+      await t.rollback();
+      return res.status(400).json({
+        status: 'error',
+        message: bankResult.error || 'Bank transfer failed'
+      });
+    }
+
+    // Deduct from sender's balance
+    await sender.update(
+      { balance: senderBalanceBefore - parseFloat(amount) },
+      { transaction: t }
+    );
+
+    // Create transaction record
+    const transaction = await Transaction.create({
+      transaction_id: txnId,
+      type: 'out',
+      category: 'Bank Transfer',
+      label: `Sent to ${bank_name} - ${account_number}`,
+      amount,
+      sender_id: sender.id,
+      sender_phone: sender.phone,
+      receiver_phone: account_number,
+      message,
+      status: bankResult.status === 'success' ? 'completed' : 'pending',
+      payment_method: 'Bank Transfer',
+      balance_before: senderBalanceBefore,
+      balance_after: senderBalanceBefore - parseFloat(amount),
+      external_reference: bankResult.transactionId,
+      metadata: JSON.stringify({
+        bank: bank_name,
+        accountName: verifyResult.accountName
+      })
+    }, { transaction: t });
+
+    await t.commit();
+
+    res.json({
+      status: 'success',
+      message: 'Bank transfer initiated successfully',
+      data: { 
+        transaction,
+        bankTransactionId: bankResult.transactionId,
+        accountName: verifyResult.accountName
+      }
+    });
+  } catch (error) {
+    await t.rollback();
+    console.error('Bank transfer error:', error);
     res.status(500).json({ status: 'error', message: error.message });
   }
 };
