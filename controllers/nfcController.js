@@ -16,14 +16,23 @@ const decryptToken = (encryptedToken) => {
   return decrypted;
 };
 
+// RECEIVER creates payment request with amount and message
 exports.createPaymentRequest = async (req, res) => {
   try {
-    const { amount, device_info } = req.body;
+    const { amount, message, device_info } = req.body; // NEW: Added message
 
     if (!amount || amount <= 0) {
       return res.status(400).json({
         status: 'error',
         message: 'Valid amount is required'
+      });
+    }
+
+    // Validate message length if provided
+    if (message && message.length > 500) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Message too long (max 500 characters)'
       });
     }
 
@@ -40,6 +49,7 @@ exports.createPaymentRequest = async (req, res) => {
       merchant_name: merchant.name,
       merchant_phone: merchant.phone,
       amount,
+      message: message || null, // NEW: Store message
       status: 'pending',
       expires_at: expiresAt,
       device_info: device_info || {}
@@ -57,6 +67,7 @@ exports.createPaymentRequest = async (req, res) => {
           phone: merchant.phone
         },
         amount: parseFloat(amount),
+        message: message || null, // NEW: Return message
         expires_at: expiresAt,
         expires_in_seconds: Math.floor((expiresAt - Date.now()) / 1000)
       }
@@ -70,6 +81,7 @@ exports.createPaymentRequest = async (req, res) => {
   }
 };
 
+// SENDER validates token and gets payment details including message
 exports.validateToken = async (req, res) => {
   try {
     const { payment_token } = req.body;
@@ -144,6 +156,7 @@ exports.validateToken = async (req, res) => {
         payment_id: nfcPayment.id,
         merchant: nfcPayment.merchant,
         amount: parseFloat(nfcPayment.amount),
+        message: nfcPayment.message || null, // NEW: Return message
         customer_balance: parseFloat(customer.balance),
         expires_at: nfcPayment.expires_at
       }
@@ -157,6 +170,7 @@ exports.validateToken = async (req, res) => {
   }
 };
 
+// SENDER processes payment with PIN
 exports.processPayment = async (req, res) => {
   const t = await sequelize.transaction();
 
@@ -164,20 +178,10 @@ exports.processPayment = async (req, res) => {
     const { payment_token, pin } = req.body;
 
     if (!payment_token || !pin) {
+      await t.rollback();
       return res.status(400).json({
         status: 'error',
         message: 'Payment token and PIN are required'
-      });
-    }
-
-    const customer = await User.scope('withPin').findByPk(req.user.id, { transaction: t });
-
-    const isPinValid = await customer.comparePin(pin);
-    if (!isPinValid) {
-      await t.rollback();
-      return res.status(401).json({
-        status: 'error',
-        message: 'Invalid PIN'
       });
     }
 
@@ -213,17 +217,22 @@ exports.processPayment = async (req, res) => {
       });
     }
 
+    const customer = await User.findByPk(req.user.id, { transaction: t });
     const merchant = await User.findByPk(nfcPayment.merchant_id, { transaction: t });
 
-    if (customer.id === merchant.id) {
+    // Verify PIN
+    const bcrypt = require('bcryptjs');
+    const isPinValid = await bcrypt.compare(pin, customer.pin);
+    
+    if (!isPinValid) {
       await t.rollback();
-      return res.status(400).json({
+      return res.status(401).json({
         status: 'error',
-        message: 'Cannot pay yourself'
+        message: 'Invalid PIN'
       });
     }
 
-    const amount = parseFloat(nfcPayment.amount);
+    const { amount } = nfcPayment;
     const customerBalanceBefore = parseFloat(customer.balance);
     const merchantBalanceBefore = parseFloat(merchant.balance);
 
@@ -245,6 +254,7 @@ exports.processPayment = async (req, res) => {
       { transaction: t }
     );
 
+    // Create transaction with message
     const transaction = await Transaction.create({
       type: 'out',
       category: 'NFC Payment',
@@ -256,6 +266,7 @@ exports.processPayment = async (req, res) => {
       receiver_phone: merchant.phone,
       status: 'completed',
       payment_method: 'NFC',
+      message: nfcPayment.message, // NEW: Store message in transaction
       balance_before: customerBalanceBefore,
       balance_after: customerBalanceBefore - amount,
       metadata: {
@@ -264,6 +275,7 @@ exports.processPayment = async (req, res) => {
       }
     }, { transaction: t });
 
+    // Create receiver transaction with message
     await Transaction.create({
       transaction_id: transaction.transaction_id + '-IN',
       type: 'in',
@@ -276,6 +288,7 @@ exports.processPayment = async (req, res) => {
       receiver_phone: merchant.phone,
       status: 'completed',
       payment_method: 'NFC',
+      message: nfcPayment.message, // NEW: Store message in receiver transaction
       balance_before: merchantBalanceBefore,
       balance_after: merchantBalanceBefore + amount,
       metadata: {
@@ -291,18 +304,21 @@ exports.processPayment = async (req, res) => {
       completed_at: new Date()
     }, { transaction: t });
 
+    // Create notifications with message context
+    const messageContext = nfcPayment.message ? ` - ${nfcPayment.message}` : '';
+    
     await Notification.create({
       user_id: merchant.id,
-      title: 'NFC Payment Received',
-      message: `You received ${amount} Rwf from ${customer.name} via NFC`,
+      title: 'Money Received Successfully',
+      message: `You received ${amount} Rwf from ${customer.name} via NFC${messageContext}`,
       type: 'payment',
       related_transaction_id: transaction.id
     }, { transaction: t });
 
     await Notification.create({
       user_id: customer.id,
-      title: 'NFC Payment Successful',
-      message: `You paid ${amount} Rwf to ${merchant.name} via NFC`,
+      title: 'Payment Sent Successfully',
+      message: `You paid ${amount} Rwf to ${merchant.name} via NFC${messageContext}`,
       type: 'payment',
       related_transaction_id: transaction.id
     }, { transaction: t });
@@ -316,6 +332,7 @@ exports.processPayment = async (req, res) => {
         transaction: {
           transaction_id: transaction.transaction_id,
           amount: parseFloat(amount),
+          message: nfcPayment.message, // NEW: Return message
           merchant: {
             name: merchant.name,
             phone: merchant.phone
@@ -339,6 +356,7 @@ exports.processPayment = async (req, res) => {
   }
 };
 
+// Get payment status (for polling)
 exports.getPaymentStatus = async (req, res) => {
   try {
     const { token } = req.params;
@@ -360,7 +378,7 @@ exports.getPaymentStatus = async (req, res) => {
         },
         {
           model: Transaction,
-          attributes: ['transaction_id', 'amount', 'status', 'created_at']
+          attributes: ['transaction_id', 'amount', 'status', 'created_at', 'message'] // NEW: Include message
         }
       ]
     });
@@ -384,115 +402,17 @@ exports.getPaymentStatus = async (req, res) => {
           id: nfcPayment.id,
           status: isExpired ? 'expired' : nfcPayment.status,
           amount: parseFloat(nfcPayment.amount),
+          message: nfcPayment.message, // NEW: Return message
           merchant: nfcPayment.merchant,
           customer: nfcPayment.customer,
           transaction: nfcPayment.Transaction,
-          created_at: nfcPayment.created_at,
           expires_at: nfcPayment.expires_at,
-          completed_at: nfcPayment.completed_at,
-          is_expired: isExpired
+          completed_at: nfcPayment.completed_at
         }
       }
     });
   } catch (error) {
     console.error('Get payment status error:', error);
-    res.status(500).json({ 
-      status: 'error', 
-      message: error.message 
-    });
-  }
-};
-
-exports.cancelPayment = async (req, res) => {
-  try {
-    const { payment_token } = req.body;
-
-    if (!payment_token) {
-      return res.status(400).json({
-        status: 'error',
-        message: 'Payment token is required'
-      });
-    }
-
-    const encryptedToken = encryptToken(payment_token);
-
-    const nfcPayment = await NFCPayment.findOne({
-      where: { 
-        payment_token: encryptedToken,
-        merchant_id: req.user.id
-      }
-    });
-
-    if (!nfcPayment) {
-      return res.status(404).json({
-        status: 'error',
-        message: 'Payment not found or you are not authorized'
-      });
-    }
-
-    if (nfcPayment.status !== 'pending') {
-      return res.status(400).json({
-        status: 'error',
-        message: `Cannot cancel payment with status: ${nfcPayment.status}`
-      });
-    }
-
-    await nfcPayment.update({ status: 'cancelled' });
-
-    res.json({
-      status: 'success',
-      message: 'Payment cancelled successfully'
-    });
-  } catch (error) {
-    console.error('Cancel payment error:', error);
-    res.status(500).json({ 
-      status: 'error', 
-      message: error.message 
-    });
-  }
-};
-
-exports.getNFCHistory = async (req, res) => {
-  try {
-    const { page = 1, limit = 20, status } = req.query;
-    const offset = (page - 1) * limit;
-
-    const where = {
-      [require('sequelize').Op.or]: [
-        { merchant_id: req.user.id },
-        { customer_id: req.user.id }
-      ]
-    };
-
-    if (status) {
-      where.status = status;
-    }
-
-    const { count, rows: payments } = await NFCPayment.findAndCountAll({
-      where,
-      limit: parseInt(limit),
-      offset,
-      order: [['created_at', 'DESC']],
-      include: [
-        { model: User, as: 'merchant', attributes: ['id', 'name', 'phone'] },
-        { model: User, as: 'customer', attributes: ['id', 'name', 'phone'] }
-      ]
-    });
-
-    res.json({
-      status: 'success',
-      data: {
-        payments,
-        pagination: {
-          total: count,
-          page: parseInt(page),
-          limit: parseInt(limit),
-          totalPages: Math.ceil(count / limit)
-        }
-      }
-    });
-  } catch (error) {
-    console.error('Get NFC history error:', error);
     res.status(500).json({ 
       status: 'error', 
       message: error.message 
