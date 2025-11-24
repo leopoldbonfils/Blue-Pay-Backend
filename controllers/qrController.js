@@ -181,26 +181,21 @@ exports.processQRPayment = async (req, res) => {
       await t.rollback();
       return res.status(400).json({
         status: 'error',
-        message: 'Valid amount is required'
+        message: 'Invalid amount'
       });
     }
 
-    // Check balance
+    // Check sender balance
     const senderBalanceBefore = parseFloat(sender.balance);
-    const receiverBalanceBefore = parseFloat(receiver.balance);
-
     if (senderBalanceBefore < finalAmount) {
       await t.rollback();
       return res.status(400).json({
         status: 'error',
-        message: 'Insufficient balance',
-        data: {
-          required: finalAmount,
-          available: senderBalanceBefore,
-          shortfall: finalAmount - senderBalanceBefore
-        }
+        message: 'Insufficient balance'
       });
     }
+
+    const receiverBalanceBefore = parseFloat(receiver.balance);
 
     // Update balances
     await sender.update(
@@ -216,11 +211,12 @@ exports.processQRPayment = async (req, res) => {
     // Generate transaction ID
     const txnId = `QR-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).substring(2, 9).toUpperCase()}`;
 
+    // ✅ FIXED: Changed category from 'QR Payment' to 'Transfer' to match database ENUM
     // Create sender transaction
     const transaction = await Transaction.create({
       transaction_id: txnId,
       type: 'out',
-      category: 'QR Payment',
+      category: 'Transfer',  // ✅ FIXED: Was 'QR Payment', now 'Transfer'
       label: `QR Payment to ${receiver.name}`,
       amount: finalAmount,
       sender_id: sender.id,
@@ -242,7 +238,7 @@ exports.processQRPayment = async (req, res) => {
     await Transaction.create({
       transaction_id: txnId + '-IN',
       type: 'in',
-      category: 'QR Payment',
+      category: 'Transfer',  // ✅ FIXED: Was 'QR Payment', now 'Transfer'
       label: `QR Payment from ${sender.name}`,
       amount: finalAmount,
       sender_id: sender.id,
@@ -281,22 +277,20 @@ exports.processQRPayment = async (req, res) => {
 
     res.json({
       status: 'success',
-      message: 'Payment completed successfully',
+      message: 'Payment processed successfully',
       data: {
         transaction: {
+          id: transaction.id,
           transaction_id: transaction.transaction_id,
-          amount: parseFloat(finalAmount),
+          amount: transaction.amount,
           receiver: {
             name: receiver.name,
             phone: receiver.phone
           },
-          sender: {
-            name: sender.name,
-            phone: sender.phone
-          },
-          completed_at: transaction.created_at,
-          new_balance: senderBalanceBefore - finalAmount
-        }
+          status: transaction.status,
+          created_at: transaction.created_at
+        },
+        new_balance: senderBalanceBefore - finalAmount
       }
     });
   } catch (error) {
@@ -316,18 +310,28 @@ exports.getQRPaymentHistory = async (req, res) => {
 
     const { count, rows: transactions } = await Transaction.findAndCountAll({
       where: {
-        [require('sequelize').Op.or]: [
+        [sequelize.Op.or]: [
           { sender_id: req.user.id },
           { receiver_id: req.user.id }
         ],
-        category: 'QR Payment'
+        metadata: {
+          payment_type: 'qr_scan'
+        }
       },
-      limit: parseInt(limit),
-      offset,
       order: [['created_at', 'DESC']],
+      limit: parseInt(limit),
+      offset: parseInt(offset),
       include: [
-        { model: User, as: 'sender', attributes: ['id', 'name', 'phone'] },
-        { model: User, as: 'receiver', attributes: ['id', 'name', 'phone'] }
+        {
+          model: User,
+          as: 'sender',
+          attributes: ['id', 'name', 'phone', 'profile_image']
+        },
+        {
+          model: User,
+          as: 'receiver',
+          attributes: ['id', 'name', 'phone', 'profile_image']
+        }
       ]
     });
 
@@ -339,7 +343,7 @@ exports.getQRPaymentHistory = async (req, res) => {
           total: count,
           page: parseInt(page),
           limit: parseInt(limit),
-          totalPages: Math.ceil(count / limit)
+          total_pages: Math.ceil(count / limit)
         }
       }
     });
